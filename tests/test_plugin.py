@@ -263,6 +263,16 @@ class TestTransactionParsing:
         assert "LU1681038912" in self.lines[2].memo
 
 
+class TestVersionLogging:
+    def test_parse_logs_plugin_version_first(self, caplog):
+        """First INFO line records the plugin version, for install diagnostics."""
+        with caplog.at_level("INFO", logger="ofxstatement_scalable.plugin"):
+            _make_parser(SAMPLE_TEXT)
+        assert caplog.records, "no log records captured"
+        first = caplog.records[0]
+        assert "ofxstatement-scalable version" in first.getMessage()
+
+
 class TestEmptyStatement:
     def test_no_transactions(self):
         text = SAMPLE_TEXT.replace(

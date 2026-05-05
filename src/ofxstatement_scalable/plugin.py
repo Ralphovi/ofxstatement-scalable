@@ -33,6 +33,8 @@ from ofxstatement.plugin import Plugin
 from ofxstatement.parser import StatementParser
 from ofxstatement.statement import Statement, StatementLine
 
+from ofxstatement_scalable import plugin_version
+
 logger = logging.getLogger(__name__)
 
 DATE_FMT = "%d.%m.%Y"
@@ -208,6 +210,10 @@ class ScalableParser(StatementParser[str]):
         self.filename = filename
 
     def parse(self) -> Statement:
+        # Version line first so the user reading the convert output can
+        # confirm which install of the plugin actually ran (helps when
+        # several checkouts / pip / pipx installs coexist).
+        logger.info("ofxstatement-scalable version %s", plugin_version())
         logger.info("Parsing %s", self.filename)
         self.statement = Statement()
         self.statement.currency = "EUR"

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.1] - 2026-05-04
+
+### Added
+- `parse()` now logs the installed plugin version as its first INFO
+  line. Lets a user reading the convert output confirm which install
+  actually ran, without having to drop out and `pip show
+  ofxstatement-scalable`. Resolved at runtime via
+  `importlib.metadata.version` with a graceful `"unknown"` fallback.
+
 ## [0.1.0] - 2026-04-06
 
 ### Added
