@@ -39,7 +39,7 @@ dev = [
   "pytest-cov",
   "mypy",
   "black",
-  "ruff",
+  "ruff>=0.17,<0.18",
   "build",
   "twine",
 ]
