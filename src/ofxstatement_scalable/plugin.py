@@ -19,18 +19,19 @@ Scalable Capital Cash Account Statement parser for ofxstatement.
 Supports PDF statements issued in English and German.
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from decimal import Decimal
-from typing import Iterator, List, Optional, Tuple
 
 import pdfplumber
-
 from ofxstatement.exceptions import ParseError
-from ofxstatement.plugin import Plugin
 from ofxstatement.parser import StatementParser
+from ofxstatement.plugin import Plugin
 from ofxstatement.statement import Statement, StatementLine
 
 from ofxstatement_scalable import plugin_version
@@ -115,7 +116,7 @@ _STRUCTURAL_RE = re.compile(
 #
 # Matching is case-insensitive prefix matching on the description field.
 # ---------------------------------------------------------------------------
-TXN_TYPE_MAP: List[Tuple[str, str]] = [
+TXN_TYPE_MAP: list[tuple[str, str]] = [
     # ── Securities ─────────────────────────────────────────────────────────
     ("Buy of a financial instrument", "DEBIT"),  # ★ ETF / fund purchase
     ("Sell of a financial instrument", "CREDIT"),  # ○ ETF / fund sale
@@ -200,7 +201,7 @@ def _parse_amount(s: str) -> Decimal:
 class ScalablePlugin(Plugin):
     """Scalable Capital statement plugin"""
 
-    def get_parser(self, filename: str) -> "ScalableParser":
+    def get_parser(self, filename: str) -> ScalableParser:
         return ScalableParser(filename)
 
 
@@ -218,7 +219,7 @@ class ScalableParser(StatementParser[str]):
         self.statement = Statement()
         self.statement.currency = "EUR"
         self.statement.account_type = "CHECKING"
-        self._unmatched_candidates: List[str] = []
+        self._unmatched_candidates: list[str] = []
 
         try:
             pdf_cm = pdfplumber.open(self.filename)
@@ -311,7 +312,7 @@ class ScalableParser(StatementParser[str]):
         or an empty-statement notice is encountered.
         """
         in_table = False
-        pending: Optional[dict] = None
+        pending: dict | None = None
         txn_seq = 0
 
         for line in text.split("\n"):
@@ -379,7 +380,7 @@ class ScalableParser(StatementParser[str]):
             if sl is not None:
                 self.statement.lines.append(sl)
 
-    def _emit(self, t: dict, seq: int) -> Optional[StatementLine]:
+    def _emit(self, t: dict, seq: int) -> StatementLine | None:
         """Convert a parsed transaction dict to a StatementLine."""
         booking_date = datetime.strptime(t["booking"], DATE_FMT)
         value_date = datetime.strptime(t["value"], DATE_FMT)
@@ -444,7 +445,7 @@ class ScalableParser(StatementParser[str]):
         if stmt.start_balance is not None and stmt.end_balance is not None:
             total = sum(
                 (line.amount for line in stmt.lines if line.amount is not None),
-                Decimal("0"),
+                Decimal(0),
             )
             expected_end = stmt.start_balance + total
             diff = stmt.end_balance - expected_end
@@ -464,5 +465,5 @@ class ScalableParser(StatementParser[str]):
     def split_records(self) -> Iterator[str]:
         return iter([])
 
-    def parse_record(self, line: str) -> Optional[StatementLine]:
+    def parse_record(self, line: str) -> StatementLine | None:
         return None

@@ -20,12 +20,11 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from ofxstatement.exceptions import ParseError
 
 from ofxstatement_scalable.plugin import (
-    ScalablePlugin,
     ScalableParser,
+    ScalablePlugin,
     _parse_amount,
     _txn_type,
 )
