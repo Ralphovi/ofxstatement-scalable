@@ -47,9 +47,13 @@ _DOCTYPE_SECURITIES_RE = re.compile(
 )
 
 # --- transaction row --------------------------------------------------------
-# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR
+# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR   (English locale)
+# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N.NNN,NN EUR   (German locale)
+_AMOUNT = r"[+-]?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}"
 _TX_RE = re.compile(
-    r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+([+-]?[\d,]+\.\d{2})\s+EUR\s*$"
+    r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+("
+    + _AMOUNT
+    + r")\s+EUR\s*$"
 )
 
 # Loose "looks like a transaction row" pattern used only to detect silent
@@ -87,6 +91,8 @@ _STRUCTURAL_RE = re.compile(
     r"|Registry Court"
     r"|Sales tax"
     r"|Managing Directors"
+    r"|Geschäftsführer"  # DE: managing directors footer
+    r"|Aufsichtsrat"  # DE: supervisory board footer
     r"|Supervisory Board"
     r"|Florian Prucker"
     r"|Dirk Franzmeyer"
@@ -133,11 +139,13 @@ TXN_TYPE_MAP: list[tuple[str, str]] = [
     ("Gutschrift", "XFER"),  # ○ DE: incoming credit
     ("Lastschrift", "DIRECTDEBIT"),  # ○ DE: SEPA direct debit
     ("Abbuchung", "XFER"),  # ○ DE: debit / withdrawal
+    ("Abhebung vom Geldkonto", "XFER"),  # ★ DE: cash-out to linked bank
     ("Auszahlung", "XFER"),  # ○ DE: withdrawal
     ("Einzahlung", "XFER"),  # ○ DE: deposit
     # ── Income ─────────────────────────────────────────────────────────────
     ("Received interest", "INT"),  # ★ PRIME+ / money-market interest
     ("Dividend", "DIV"),  # ○ dividend payment
+    ("Erhaltene Zinsen", "INT"),  # ★ DE: PRIME+ / Tagesgeld interest
     ("Zinsgutschrift", "INT"),  # ○ DE: interest credit
     ("Zinsen", "INT"),  # ○ DE: interest
     ("Dividende", "DIV"),  # ○ DE: dividend
@@ -191,10 +199,17 @@ def _make_id(date: datetime, amount: Decimal, memo: str, seq: int) -> str:
 
 
 def _parse_amount(s: str) -> Decimal:
-    """Parse an English-locale decimal string (comma = thousands separator).
+    """Parse an English- or German-locale amount with exactly two decimals.
 
-    Examples: '+602.96', '-13,864.86', '14,466.34', '0.00'
+    The character three positions from the end is the decimal separator;
+    the other one is the thousands separator.
+
+    Examples: '+602.96', '-13,864.86', '14,466.34', '0.00' (EN);
+    '-245,36', '+1.234,56', '13.756,76' (DE)
     """
+    s = s.strip()
+    if len(s) >= 3 and s[-3] == ",":
+        return Decimal(s.replace(".", "").replace(",", "."))
     return Decimal(s.replace(",", ""))
 
 
@@ -289,11 +304,14 @@ class ScalableParser(StatementParser[str]):
         # Balances: EN "Balance on" / DE "Kontostand am" / "Saldo am"
         balance_re = re.compile(
             r"(?:Balance on|Kontostand am|Saldo am)"
-            r"\s+\d{2}\.\d{2}\.\d{4}\s+([\d,]+\.\d{2})\s+EUR"
+            r"\s+\d{2}\.\d{2}\.\d{4}\s+(" + _AMOUNT + r")\s+EUR"
         )
         balances = balance_re.findall(text)
         if len(balances) >= 1:
             self.statement.start_balance = _parse_amount(balances[0])
+            # Kept separately: _sanity_check may replace start_balance with a
+            # value derived from the end balance (see there).
+            self.printed_start_balance: Decimal | None = self.statement.start_balance
         if len(balances) >= 2:
             self.statement.end_balance = _parse_amount(balances[-1])
         logger.debug(
@@ -450,17 +468,26 @@ class ScalableParser(StatementParser[str]):
             expected_end = stmt.start_balance + total
             diff = stmt.end_balance - expected_end
             if abs(diff) > Decimal("0.005"):
+                # Scalable prints the opening balance as of the first *value*
+                # date, so bookings valued before the period (or after it, on
+                # the previous statement) make it disagree with the listed
+                # transactions.  The closing balance is consistent with the
+                # next statement's bookings, so trust it and derive the start.
+                derived_start = stmt.end_balance - total
                 logger.warning(
                     "Balance check failed: start=%s + sum(%d txns)=%s = %s, "
-                    "but parsed end=%s (diff=%s). Likely causes: a missing "
-                    "transaction, a misread amount, or wrong start/end balances.",
+                    "but parsed end=%s (diff=%s). Using start balance %s "
+                    "derived from the end balance — verify it against the "
+                    "previous statement's end balance.",
                     stmt.start_balance,
                     len(stmt.lines),
                     total,
                     expected_end,
                     stmt.end_balance,
                     diff,
+                    derived_start,
                 )
+                stmt.start_balance = derived_start
 
     def split_records(self) -> Iterator[str]:
         return iter([])

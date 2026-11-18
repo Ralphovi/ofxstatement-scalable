@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- German-locale statements (`Kontoauszug`, from April 2026 onward) parsed to
+  0 transactions: amounts like `-245,36 EUR` / `+1.234,56 EUR` are now read in
+  transaction rows and balance lines.
+- Statements failed ofxstatement's balance validation because Scalable prints
+  the opening balance as of the first value date. When start + transactions ≠
+  end, the start balance is now derived from the (reliable) end balance and a
+  warning is logged; the printed value stays available as
+  `parser.printed_start_balance`.
+- German page footers (`Geschäftsführer: …`, `Aufsichtsrat: …`) no longer leak
+  into transaction memos.
+
+### Added
+- Transaction types `Erhaltene Zinsen` (INT) and `Abhebung vom Geldkonto`
+  (XFER), confirmed against real statements.
+
 ## [0.1.2] - 2026-05-08
 
 ### Developer tooling

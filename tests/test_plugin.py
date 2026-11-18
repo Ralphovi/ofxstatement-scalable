@@ -191,7 +191,8 @@ def _make_parser(text: str) -> ScalableParser:
 
 class TestHeaderParsing:
     def setup_method(self):
-        self.stmt = _make_parser(SAMPLE_TEXT).statement
+        self.parser = _make_parser(SAMPLE_TEXT)
+        self.stmt = self.parser.statement
 
     def test_account_id(self):
         assert self.stmt.account_id == "DE19120700700756225027"
@@ -209,7 +210,7 @@ class TestHeaderParsing:
         assert self.stmt.end_date == datetime(2025, 12, 31)
 
     def test_start_balance(self):
-        assert self.stmt.start_balance == Decimal("14466.34")
+        assert self.parser.printed_start_balance == Decimal("14466.34")
 
     def test_end_balance(self):
         assert self.stmt.end_balance == Decimal("1204.44")
@@ -319,14 +320,15 @@ class TestMultiPage:
 
 class TestGermanStatement:
     def setup_method(self):
-        self.stmt = _make_parser(GERMAN_TEXT).statement
+        self.parser = _make_parser(GERMAN_TEXT)
+        self.stmt = self.parser.statement
         self.lines = self.stmt.lines
 
     def test_account_id(self):
         assert self.stmt.account_id == "DE19120700700756225027"
 
     def test_start_balance(self):
-        assert self.stmt.start_balance == Decimal("14466.34")
+        assert self.parser.printed_start_balance == Decimal("14466.34")
 
     def test_period(self):
         assert self.stmt.start_date == datetime(2025, 12, 1)
@@ -447,12 +449,13 @@ Keine Kontobewegungen in diesem Zeitraum
 
 class TestGermanMultiPage:
     def setup_method(self):
-        self.stmt = _make_parser(GERMAN_MULTIPAGE_TEXT).statement
+        self.parser = _make_parser(GERMAN_MULTIPAGE_TEXT)
+        self.stmt = self.parser.statement
         self.lines = self.stmt.lines
 
     def test_saldo_am_balance_label(self):
         # Verifies the alternate DE balance label "Saldo am" is recognised
-        assert self.stmt.start_balance == Decimal("2616.34")
+        assert self.parser.printed_start_balance == Decimal("2616.34")
         assert self.stmt.end_balance == Decimal("15067.82")
 
     def test_transaction_count(self):
@@ -533,3 +536,74 @@ Booking Value date Description Amount
             stmt = _make_parser(drifted).statement
         assert len(stmt.lines) == 0
         assert any("_TX_RE may be out of date" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# German-locale amounts, footer lines and Scalable's value-dated opening
+# balance (observed on real statements from April 2026 onward)
+# ---------------------------------------------------------------------------
+
+GERMAN_LOCALE_TEXT = """\
+Scalable Capital Bank GmbH • Seitzstraße 8e • 80538 München • Deutschland
+Kontoauszug
+Zeitraum 01.04.2026 - 30.04.2026
+Verrechnungskonto DE00120700700000000000 (DEUTDEFFXXX)
+Kontostand am 01.04.2026 0,00 EUR
+Kontostand am 30.04.2026 1.608,88 EUR
+Buchung Wertstellung Beschreibung Betrag
+01.04.2026 31.03.2026 Erhaltene Zinsen +1,22 EUR
+01.04.2026 07.04.2026 Kauf eines Finanzinstruments -1.202,50 EUR
+6,51 Stk. Xtrackers S&P 500 Swap II (Acc) (IE000HY30YW6)
+Geschäftsführer: Florian Prucker, Martin Krebs, Dirk Franzmeyer, Dr. Andreas Schranzhofer 1 / 2
+Aufsichtsrat: Patrick Olson (Vorsitzender)
+05.04.2026 06.04.2026 Abhebung vom Geldkonto -200,00 EUR
+29.04.2026 30.04.2026 Lastschrift +3.010,16 EUR
+Verteilung Ihrer Einlagen
+"""
+
+
+class TestGermanLocale:
+    def setup_method(self):
+        self.parser = _make_parser(GERMAN_LOCALE_TEXT)
+        self.stmt = self.parser.statement
+
+    def test_parse_amount_german(self):
+        assert _parse_amount("-245,36") == Decimal("-245.36")
+        assert _parse_amount("+1.234,56") == Decimal("1234.56")
+        assert _parse_amount("13.756,76") == Decimal("13756.76")
+
+    def test_all_rows_parsed(self):
+        assert [line.amount for line in self.stmt.lines] == [
+            Decimal("1.22"),
+            Decimal("-1202.50"),
+            Decimal("-200.00"),
+            Decimal("3010.16"),
+        ]
+
+    def test_types(self):
+        assert [line.trntype for line in self.stmt.lines] == [
+            "INT",
+            "DEBIT",
+            "XFER",
+            "DIRECTDEBIT",
+        ]
+
+    def test_footer_not_in_memo(self):
+        buy = self.stmt.lines[1]
+        assert "IE000HY30YW6" in buy.memo
+        assert "Geschäftsführer" not in buy.memo
+        assert "Aufsichtsrat" not in buy.memo
+
+    def test_end_balance(self):
+        assert self.stmt.end_balance == Decimal("1608.88")
+
+
+def test_inconsistent_opening_balance_is_derived_from_end_balance():
+    # Scalable prints the opening balance as of the first value date; here the
+    # printed 190,00 disagrees with the bookings, the closing balance is right.
+    text = GERMAN_LOCALE_TEXT.replace(
+        "Kontostand am 01.04.2026 0,00 EUR", "Kontostand am 01.04.2026 190,00 EUR"
+    )
+    stmt = _make_parser(text).statement
+    assert stmt.end_balance == Decimal("1608.88")
+    assert stmt.start_balance == Decimal("0.00")
