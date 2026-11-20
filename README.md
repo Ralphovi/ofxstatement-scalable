@@ -157,7 +157,9 @@ Only the closing balance is written to the OFX file (`LEDGERBAL`). In both
 modes a statement is rejected when a line in the transaction table starts
 with a date but is not a complete row (format drift, or an amount split onto
 the next line); with `derive` it is also rejected when the balance moved but
-no row parsed.
+no row parsed. A statement without its period, or without balance lines on
+the first and last day of the period, is rejected, as is one with
+booking-date/value-date lines outside a recognised transaction table.
 
 To see detailed parsing output (useful for diagnosing issues):
 

@@ -665,7 +665,7 @@ def test_unrecognised_table_is_not_reconciled():
     text = BALANCED_TEXT.replace(
         "Booking Value date Description Amount", "Booking Value date Text Amount"
     )
-    with pytest.raises(ParseError, match="not recognised"):
+    with pytest.raises(ParseError, match="outside a recognised transaction table"):
         _make_parser(text, opening_balance="derive")
 
 
@@ -716,3 +716,37 @@ def test_split_row_after_valid_row_is_rejected():
     )
     with pytest.raises(ParseError, match="unparsed transaction row"):
         _make_parser(text, opening_balance="derive")
+
+
+def test_rows_under_drifted_header_are_rejected_even_if_balanced():
+    text = (
+        BALANCED_TEXT.replace(
+            "Balance on 31.12.2025 950.00 EUR", "Balance on 31.12.2025 1,000.00 EUR"
+        )
+        .replace(
+            "Booking Value date Description Amount", "Booking Value date Text Amount"
+        )
+        .replace(
+            "05.12.2025 05.12.2025 Trade fee -50.00 EUR",
+            "05.12.2025 05.12.2025 Credit transfer +100.00 EUR\n"
+            "06.12.2025 06.12.2025 Withdrawal from cash account -100.00 EUR",
+        )
+    )
+    for mode in ("printed", "derive"):
+        with pytest.raises(ParseError, match="row-shaped"):
+            _make_parser(text, opening_balance=mode)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Balance on 01.12.2025 1,000.00 EUR", "Balance on 31.12.2025 950.00 EUR"],
+)
+def test_missing_balance_is_rejected(line):
+    with pytest.raises(ParseError, match="expected balances"):
+        _make_parser(BALANCED_TEXT.replace(line + "\n", ""), opening_balance="printed")
+
+
+def test_missing_period_is_rejected():
+    text = BALANCED_TEXT.replace("Period 01.12.2025 - 31.12.2025\n", "")
+    with pytest.raises(ParseError, match="period"):
+        _make_parser(text)

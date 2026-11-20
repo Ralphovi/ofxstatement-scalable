@@ -26,6 +26,9 @@
 - A statement with a date-prefixed line in the transaction table that is not
   a complete row is now rejected in every mode (previously a warning), since
   the converted statement would be incomplete.
+- A statement is rejected when the period or either balance line (first and
+  last day of the period) is missing, or when a row-shaped line (booking
+  date + value date) lies outside a recognised transaction table.
 - Transaction types `Erhaltene Zinsen` (INT) and `Abhebung vom Geldkonto`
   (XFER), confirmed against real statements.
 

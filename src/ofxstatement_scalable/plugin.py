@@ -65,6 +65,9 @@ _TX_RE = re.compile(
 # amount was split onto the next line -- makes the statement incomplete, and
 # the parser rejects it rather than guess.
 _CANDIDATE_TX_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\b")
+# Booking date + value date: the start of every transaction row, wherever it
+# appears in the document.
+_ROW_SHAPED_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\s+\d{2}\.\d{2}\.\d{4}\b")
 
 # --- table header (EN / DE) -------------------------------------------------
 # When seen, we enter (or re-enter) the transaction table.
@@ -294,7 +297,7 @@ class ScalableParser(StatementParser[str]):
 
         self._parse_header(full_text)
         self._parse_transactions(full_text)
-        self._sanity_check()
+        self._sanity_check(full_text)
 
         logger.info("Done: %d transaction(s)", len(self.statement.lines))
         return self.statement
@@ -320,21 +323,28 @@ class ScalableParser(StatementParser[str]):
             self.statement.end_date = datetime.strptime(m.group(2), DATE_FMT)
             logger.debug("Period: %s – %s", m.group(1), m.group(2))
         else:
-            logger.warning("Period not found in header")
+            raise ParseError(0, f"{self.filename}: statement period not found")
 
-        # Balances: EN "Balance on" / DE "Kontostand am" / "Saldo am"
+        # Balances: EN "Balance on" / DE "Kontostand am" / "Saldo am".  Every
+        # statement prints exactly two: on the first and the last day of the
+        # period.  Without both the statement cannot be checked, so reject it.
         balance_re = re.compile(
             r"(?:Balance on|Kontostand am|Saldo am)"
-            r"\s+\d{2}\.\d{2}\.\d{4}\s+(" + _AMOUNT + r")\s+EUR"
+            r"\s+(\d{2}\.\d{2}\.\d{4})\s+(" + _AMOUNT + r")\s+EUR"
         )
         balances = balance_re.findall(text)
-        if len(balances) >= 1:
-            self.statement.start_balance = _parse_amount(balances[0])
-            # Kept separately: _sanity_check may replace start_balance with a
-            # value derived from the end balance (see there).
-            self.printed_start_balance: Decimal | None = self.statement.start_balance
-        if len(balances) >= 2:
-            self.statement.end_balance = _parse_amount(balances[-1])
+        expected_dates = [m.group(1), m.group(2)]
+        if [date for date, _ in balances] != expected_dates:
+            raise ParseError(
+                0,
+                f"{self.filename}: expected balances on {expected_dates[0]} and "
+                f"{expected_dates[1]}, found dates {[d for d, _ in balances]}",
+            )
+        self.statement.start_balance = _parse_amount(balances[0][1])
+        # Kept separately: _sanity_check may replace start_balance with a
+        # value derived from the end balance (see there).
+        self.printed_start_balance: Decimal | None = self.statement.start_balance
+        self.statement.end_balance = _parse_amount(balances[1][1])
         logger.debug(
             "Balances: start=%s end=%s",
             self.statement.start_balance,
@@ -459,7 +469,22 @@ class ScalableParser(StatementParser[str]):
         )
         return line
 
-    def _sanity_check(self) -> None:
+    def _check_all_rows_parsed(self, text: str) -> None:
+        """Every row-shaped line in the document must have become a row.
+
+        Catches rows outside a recognised table (e.g. a drifted table
+        header), which the table scan never looks at.
+        """
+        row_shaped = [line for line in text.split("\n") if _ROW_SHAPED_RE.match(line)]
+        if len(row_shaped) != len(self.statement.lines):
+            raise ParseError(
+                0,
+                f"{self.filename}: {len(row_shaped)} row-shaped line(s) but "
+                f"{len(self.statement.lines)} parsed transaction(s) — rows "
+                "outside a recognised transaction table?",
+            )
+
+    def _sanity_check(self, text: str) -> None:
         """Reject incomplete statements; reconcile the balances."""
         stmt = self.statement
 
@@ -472,6 +497,7 @@ class ScalableParser(StatementParser[str]):
                 "statement would be incomplete (format drift or a row split "
                 "across lines).",
             )
+        self._check_all_rows_parsed(text)
 
         if stmt.start_balance is not None and stmt.end_balance is not None:
             total = sum(
