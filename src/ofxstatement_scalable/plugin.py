@@ -60,11 +60,11 @@ _TX_RE = re.compile(
     + r")\s+EUR\s*$"
 )
 
-# Loose "looks like a transaction row" pattern used only to detect silent
-# breakage of _TX_RE: two dates on a line that mentions EUR somewhere.  If
-# _TX_RE matched nothing but this does, the strict regex has drifted and
-# probably needs updating (amount format, trailing tokens, etc.).
-_CANDIDATE_TX_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\s+\d{2}\.\d{2}\.\d{4}\b.*\bEUR\b")
+# Inside the transaction table every line that starts with a date must be a
+# complete row (_TX_RE).  Anything else -- drifted amount format, a row whose
+# amount was split onto the next line -- makes the statement incomplete, and
+# the parser rejects it rather than guess.
+_CANDIDATE_TX_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\b")
 
 # --- table header (EN / DE) -------------------------------------------------
 # When seen, we enter (or re-enter) the transaction table.
@@ -460,25 +460,17 @@ class ScalableParser(StatementParser[str]):
         return line
 
     def _sanity_check(self) -> None:
-        """Warn about silent-failure modes: regex drift and balance mismatch."""
+        """Reject incomplete statements; reconcile the balances."""
         stmt = self.statement
 
         candidates = getattr(self, "_unmatched_candidates", [])
-        if not stmt.lines and candidates:
-            sample = candidates[:3]
-            logger.warning(
-                "Parsed 0 transactions but found %d line(s) that look like "
-                "transaction rows — _TX_RE may be out of date. "
-                "Sample unmatched line(s): %s",
-                len(candidates),
-                " | ".join(repr(s[:100]) for s in sample),
-            )
-        elif candidates:
-            logger.warning(
-                "%d line(s) look like transaction rows but did not match "
-                "_TX_RE — check for format drift. Sample: %r",
-                len(candidates),
-                candidates[0][:100],
+        if candidates:
+            raise ParseError(
+                0,
+                f"{self.filename}: {len(candidates)} unparsed transaction "
+                f"row(s) in the table, e.g. {candidates[0][:100]!r} — the "
+                "statement would be incomplete (format drift or a row split "
+                "across lines).",
             )
 
         if stmt.start_balance is not None and stmt.end_balance is not None:
@@ -489,17 +481,6 @@ class ScalableParser(StatementParser[str]):
             expected_end = stmt.start_balance + total
             diff = stmt.end_balance - expected_end
             if abs(diff) > Decimal("0.005"):
-                if candidates:
-                    # Known unparsed rows explain (part of) the gap; adjusting
-                    # the opening balance would hide them behind a balance
-                    # that reconciles.  Fail instead.
-                    raise ParseError(
-                        0,
-                        f"{self.filename}: balance mismatch (diff={diff}) with "
-                        f"{len(candidates)} unparsed transaction row(s), e.g. "
-                        f"{candidates[0][:100]!r} — refusing to derive the "
-                        "opening balance from incomplete transactions.",
-                    )
                 if self.opening_balance != "derive":
                     raise ParseError(
                         0,

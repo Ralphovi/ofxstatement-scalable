@@ -537,10 +537,9 @@ class TestSanityCheck:
         assert any("Balance check failed" in r.message for r in caplog.records)
         assert stmt.start_balance == Decimal("1049.99")
 
-    def test_regex_drift_warns(self, caplog):
-        # Simulate drift: amount format changed from "-50.00 EUR" to "EUR -50,00"
-        # (comma decimal). _TX_RE fails; _CANDIDATE_TX_RE still matches
-        # because both dates and EUR are present.
+    def test_regex_drift_is_rejected(self):
+        # Amount format drifted ("EUR -50,00"): rows no longer match _TX_RE.
+        # Balances still reconcile, but the statement would be incomplete.
         drifted = """\
 Scalable Capital Bank GmbH
 Cash Account Statement
@@ -552,10 +551,9 @@ Booking Value date Description Amount
 01.12.2025 03.12.2025 Trade fee EUR -50,00
 02.12.2025 04.12.2025 Trade fee EUR -50,00
 """
-        with caplog.at_level("WARNING", logger="ofxstatement_scalable.plugin"):
-            stmt = _make_parser(drifted, opening_balance="printed").statement
-        assert len(stmt.lines) == 0
-        assert any("_TX_RE may be out of date" in r.message for r in caplog.records)
+        for mode in ("printed", "derive"):
+            with pytest.raises(ParseError, match="unparsed transaction row"):
+                _make_parser(drifted, opening_balance=mode)
 
 
 # ---------------------------------------------------------------------------
@@ -696,3 +694,25 @@ def test_plugin_setting_selects_opening_balance_mode():
     assert ScalablePlugin(UI(), {}).get_parser("x.pdf").opening_balance == "printed"
     with pytest.raises(ValueError):
         ScalablePlugin(UI(), {"opening_balance": "yes"}).get_parser("x.pdf")
+
+
+def test_balance_neutral_unparsed_rows_are_rejected():
+    text = BALANCED_TEXT.replace(
+        "05.12.2025 05.12.2025 Trade fee -50.00 EUR",
+        "05.12.2025 05.12.2025 Trade fee -50.00 EUR\n"
+        "06.12.2025 06.12.2025 Credit transfer EUR +10.00\n"
+        "07.12.2025 07.12.2025 Withdrawal from cash account EUR -10.00",
+    )
+    for mode in ("printed", "derive"):
+        with pytest.raises(ParseError, match="unparsed transaction row"):
+            _make_parser(text, opening_balance=mode)
+
+
+def test_split_row_after_valid_row_is_rejected():
+    text = BALANCED_TEXT.replace(
+        "05.12.2025 05.12.2025 Trade fee -50.00 EUR",
+        "04.12.2025 04.12.2025 Credit transfer +10.00 EUR\n"
+        "05.12.2025 05.12.2025 Trade fee -60.00\nEUR",
+    )
+    with pytest.raises(ParseError, match="unparsed transaction row"):
+        _make_parser(text, opening_balance="derive")

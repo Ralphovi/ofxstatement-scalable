@@ -153,9 +153,11 @@ opening_balance = derive
 ofxstatement convert -t scalable statement.pdf statement.ofx
 ```
 
-Only the closing balance is written to the OFX file (`LEDGERBAL`). Even with
-`derive`, statements with rows that look like transactions but do not parse,
-or with a moved balance and no parsed rows, are rejected.
+Only the closing balance is written to the OFX file (`LEDGERBAL`). In both
+modes a statement is rejected when a line in the transaction table starts
+with a date but is not a complete row (format drift, or an amount split onto
+the next line); with `derive` it is also rejected when the balance moved but
+no row parsed.
 
 To see detailed parsing output (useful for diagnosing issues):
 
