@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- German-locale statements (`Kontoauszug`, from April 2026 onward) parsed to
+  0 transactions: amounts like `-245,36 EUR` / `+1.234,56 EUR` are now read in
+  transaction rows and balance lines.
+- Amounts of 1000 or more without a thousands separator (`1000.00`,
+  `1000,00`) are read again; amounts whose thousands and decimal separators
+  are the same (`1,234,56`) are no longer taken as transaction rows.
+- German page footers (`Geschäftsführer: …`, `Aufsichtsrat: …`) no longer leak
+  into transaction memos.
+
+### Added
+- Setting `opening_balance` (`printed` by default, or `derive`). Scalable
+  prints the opening balance as of the first value date, so it often
+  disagrees with the listed bookings and such statements are rejected. With
+  `opening_balance = derive` the start balance is derived from the end
+  balance and a warning is logged; the printed value stays available as
+  `parser.printed_start_balance`. Derivation is refused when no transaction
+  parsed although the balance moved. Use it only if your books check each
+  closing balance.
+
+### Changed
+- A statement with a date-prefixed line in the transaction table that is not
+  a complete row is now rejected in every mode (previously a warning), since
+  the converted statement would be incomplete.
+- A statement is rejected when the period or either balance line (first and
+  last day of the period) is missing, or when a row-shaped line (booking
+  date + value date) lies outside a recognised transaction table.
+- Transaction types `Erhaltene Zinsen` (INT) and `Abhebung vom Geldkonto`
+  (XFER), confirmed against real statements.
+
 ## [0.1.2] - 2026-05-08
 
 ### Developer tooling

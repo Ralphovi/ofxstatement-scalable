@@ -129,6 +129,38 @@ for f in *.pdf; do
 done
 ```
 
+### Opening balance
+
+Scalable prints the opening balance as of the first *value* date. Bookings
+valued in the previous month (e.g. interest credited on the 1st, valued on the
+31st) make it disagree with the listed transactions; on the real statements
+checked so far about half do not reconcile. By default such a statement is
+rejected, because a single file cannot tell that apart from a transaction the
+parser missed.
+
+If your books check every closing balance (GnuCash reconciliation, Beancount
+`balance` assertions), let the plugin derive the opening balance from the
+closing balance instead:
+
+```ini
+# ofxstatement edit-config
+[scalable]
+plugin = scalable
+opening_balance = derive
+```
+
+```
+ofxstatement convert -t scalable statement.pdf statement.ofx
+```
+
+Only the closing balance is written to the OFX file (`LEDGERBAL`). In both
+modes a statement is rejected when a line in the transaction table starts
+with a date but is not a complete row (format drift, or an amount split onto
+the next line); with `derive` it is also rejected when the balance moved but
+no row parsed. A statement without its period, or without balance lines on
+the first and last day of the period, is rejected, as is one with
+booking-date/value-date lines outside a recognised transaction table.
+
 To see detailed parsing output (useful for diagnosing issues):
 
 ```

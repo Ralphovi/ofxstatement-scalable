@@ -47,16 +47,27 @@ _DOCTYPE_SECURITIES_RE = re.compile(
 )
 
 # --- transaction row --------------------------------------------------------
-# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR
+# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR   (English locale)
+# DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N.NNN,NN EUR   (German locale)
+# English "1,234.56" / German "1.234,56"; thousands separators are optional
+# ("1234.56", "1234,56") but must differ from the decimal separator.
+_AMOUNT = (
+    r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}" r"|(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2})"
+)
 _TX_RE = re.compile(
-    r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+([+-]?[\d,]+\.\d{2})\s+EUR\s*$"
+    r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+("
+    + _AMOUNT
+    + r")\s+EUR\s*$"
 )
 
-# Loose "looks like a transaction row" pattern used only to detect silent
-# breakage of _TX_RE: two dates on a line that mentions EUR somewhere.  If
-# _TX_RE matched nothing but this does, the strict regex has drifted and
-# probably needs updating (amount format, trailing tokens, etc.).
-_CANDIDATE_TX_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\s+\d{2}\.\d{2}\.\d{4}\b.*\bEUR\b")
+# Inside the transaction table every line that starts with a date must be a
+# complete row (_TX_RE).  Anything else -- drifted amount format, a row whose
+# amount was split onto the next line -- makes the statement incomplete, and
+# the parser rejects it rather than guess.
+_CANDIDATE_TX_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\b")
+# Booking date + value date: the start of every transaction row, wherever it
+# appears in the document.
+_ROW_SHAPED_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\s+\d{2}\.\d{2}\.\d{4}\b")
 
 # --- table header (EN / DE) -------------------------------------------------
 # When seen, we enter (or re-enter) the transaction table.
@@ -87,6 +98,8 @@ _STRUCTURAL_RE = re.compile(
     r"|Registry Court"
     r"|Sales tax"
     r"|Managing Directors"
+    r"|Geschäftsführer"  # DE: managing directors footer
+    r"|Aufsichtsrat"  # DE: supervisory board footer
     r"|Supervisory Board"
     r"|Florian Prucker"
     r"|Dirk Franzmeyer"
@@ -133,11 +146,13 @@ TXN_TYPE_MAP: list[tuple[str, str]] = [
     ("Gutschrift", "XFER"),  # ○ DE: incoming credit
     ("Lastschrift", "DIRECTDEBIT"),  # ○ DE: SEPA direct debit
     ("Abbuchung", "XFER"),  # ○ DE: debit / withdrawal
+    ("Abhebung vom Geldkonto", "XFER"),  # ★ DE: cash-out to linked bank
     ("Auszahlung", "XFER"),  # ○ DE: withdrawal
     ("Einzahlung", "XFER"),  # ○ DE: deposit
     # ── Income ─────────────────────────────────────────────────────────────
     ("Received interest", "INT"),  # ★ PRIME+ / money-market interest
     ("Dividend", "DIV"),  # ○ dividend payment
+    ("Erhaltene Zinsen", "INT"),  # ★ DE: PRIME+ / Tagesgeld interest
     ("Zinsgutschrift", "INT"),  # ○ DE: interest credit
     ("Zinsen", "INT"),  # ○ DE: interest
     ("Dividende", "DIV"),  # ○ DE: dividend
@@ -191,10 +206,17 @@ def _make_id(date: datetime, amount: Decimal, memo: str, seq: int) -> str:
 
 
 def _parse_amount(s: str) -> Decimal:
-    """Parse an English-locale decimal string (comma = thousands separator).
+    """Parse an English- or German-locale amount with exactly two decimals.
 
-    Examples: '+602.96', '-13,864.86', '14,466.34', '0.00'
+    The character three positions from the end is the decimal separator;
+    the other one is the thousands separator.
+
+    Examples: '+602.96', '-13,864.86', '14,466.34', '0.00' (EN);
+    '-245,36', '+1.234,56', '13.756,76' (DE)
     """
+    s = s.strip()
+    if len(s) >= 3 and s[-3] == ",":
+        return Decimal(s.replace(".", "").replace(",", "."))
     return Decimal(s.replace(",", ""))
 
 
@@ -202,13 +224,30 @@ class ScalablePlugin(Plugin):
     """Scalable Capital statement plugin"""
 
     def get_parser(self, filename: str) -> ScalableParser:
-        return ScalableParser(filename)
+        mode = str(self.settings.get("opening_balance", "printed")).strip().lower()
+        if mode not in OPENING_BALANCE_MODES:
+            raise ValueError(
+                f"opening_balance must be one of {', '.join(OPENING_BALANCE_MODES)}, "
+                f"not {mode!r}"
+            )
+        return ScalableParser(filename, opening_balance=mode)
+
+
+# "printed": a statement whose printed balances don't reconcile is rejected.
+# "derive":  the opening balance is derived from the closing balance instead.
+#            Only for consumers that check each closing balance against the
+#            next statement or their own books: a single file cannot tell
+#            Scalable's value-dated opening balance from a lost transaction.
+OPENING_BALANCE_MODES = ("printed", "derive")
 
 
 class ScalableParser(StatementParser[str]):
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, opening_balance: str = "printed") -> None:
         super().__init__()
+        if opening_balance not in OPENING_BALANCE_MODES:
+            raise ValueError(f"unknown opening_balance mode {opening_balance!r}")
         self.filename = filename
+        self.opening_balance = opening_balance
 
     def parse(self) -> Statement:
         # Version line first so the user reading the convert output can
@@ -258,7 +297,7 @@ class ScalableParser(StatementParser[str]):
 
         self._parse_header(full_text)
         self._parse_transactions(full_text)
-        self._sanity_check()
+        self._sanity_check(full_text)
 
         logger.info("Done: %d transaction(s)", len(self.statement.lines))
         return self.statement
@@ -284,18 +323,28 @@ class ScalableParser(StatementParser[str]):
             self.statement.end_date = datetime.strptime(m.group(2), DATE_FMT)
             logger.debug("Period: %s – %s", m.group(1), m.group(2))
         else:
-            logger.warning("Period not found in header")
+            raise ParseError(0, f"{self.filename}: statement period not found")
 
-        # Balances: EN "Balance on" / DE "Kontostand am" / "Saldo am"
+        # Balances: EN "Balance on" / DE "Kontostand am" / "Saldo am".  Every
+        # statement prints exactly two: on the first and the last day of the
+        # period.  Without both the statement cannot be checked, so reject it.
         balance_re = re.compile(
             r"(?:Balance on|Kontostand am|Saldo am)"
-            r"\s+\d{2}\.\d{2}\.\d{4}\s+([\d,]+\.\d{2})\s+EUR"
+            r"\s+(\d{2}\.\d{2}\.\d{4})\s+(" + _AMOUNT + r")\s+EUR"
         )
         balances = balance_re.findall(text)
-        if len(balances) >= 1:
-            self.statement.start_balance = _parse_amount(balances[0])
-        if len(balances) >= 2:
-            self.statement.end_balance = _parse_amount(balances[-1])
+        expected_dates = [m.group(1), m.group(2)]
+        if [date for date, _ in balances] != expected_dates:
+            raise ParseError(
+                0,
+                f"{self.filename}: expected balances on {expected_dates[0]} and "
+                f"{expected_dates[1]}, found dates {[d for d, _ in balances]}",
+            )
+        self.statement.start_balance = _parse_amount(balances[0][1])
+        # Kept separately: _sanity_check may replace start_balance with a
+        # value derived from the end balance (see there).
+        self.printed_start_balance: Decimal | None = self.statement.start_balance
+        self.statement.end_balance = _parse_amount(balances[1][1])
         logger.debug(
             "Balances: start=%s end=%s",
             self.statement.start_balance,
@@ -420,27 +469,35 @@ class ScalableParser(StatementParser[str]):
         )
         return line
 
-    def _sanity_check(self) -> None:
-        """Warn about silent-failure modes: regex drift and balance mismatch."""
+    def _check_all_rows_parsed(self, text: str) -> None:
+        """Every row-shaped line in the document must have become a row.
+
+        Catches rows outside a recognised table (e.g. a drifted table
+        header), which the table scan never looks at.
+        """
+        row_shaped = [line for line in text.split("\n") if _ROW_SHAPED_RE.match(line)]
+        if len(row_shaped) != len(self.statement.lines):
+            raise ParseError(
+                0,
+                f"{self.filename}: {len(row_shaped)} row-shaped line(s) but "
+                f"{len(self.statement.lines)} parsed transaction(s) — rows "
+                "outside a recognised transaction table?",
+            )
+
+    def _sanity_check(self, text: str) -> None:
+        """Reject incomplete statements; reconcile the balances."""
         stmt = self.statement
 
         candidates = getattr(self, "_unmatched_candidates", [])
-        if not stmt.lines and candidates:
-            sample = candidates[:3]
-            logger.warning(
-                "Parsed 0 transactions but found %d line(s) that look like "
-                "transaction rows — _TX_RE may be out of date. "
-                "Sample unmatched line(s): %s",
-                len(candidates),
-                " | ".join(repr(s[:100]) for s in sample),
+        if candidates:
+            raise ParseError(
+                0,
+                f"{self.filename}: {len(candidates)} unparsed transaction "
+                f"row(s) in the table, e.g. {candidates[0][:100]!r} — the "
+                "statement would be incomplete (format drift or a row split "
+                "across lines).",
             )
-        elif candidates:
-            logger.warning(
-                "%d line(s) look like transaction rows but did not match "
-                "_TX_RE — check for format drift. Sample: %r",
-                len(candidates),
-                candidates[0][:100],
-            )
+        self._check_all_rows_parsed(text)
 
         if stmt.start_balance is not None and stmt.end_balance is not None:
             total = sum(
@@ -450,17 +507,46 @@ class ScalableParser(StatementParser[str]):
             expected_end = stmt.start_balance + total
             diff = stmt.end_balance - expected_end
             if abs(diff) > Decimal("0.005"):
+                if self.opening_balance != "derive":
+                    raise ParseError(
+                        0,
+                        f"{self.filename}: start {stmt.start_balance} + "
+                        f"{len(stmt.lines)} transaction(s) {total} = "
+                        f"{expected_end}, but the end balance is "
+                        f"{stmt.end_balance} (diff={diff}). Scalable's printed "
+                        "opening balance is value-dated and often disagrees; "
+                        "set opening_balance = derive if your books check each "
+                        "closing balance.",
+                    )
+                if not stmt.lines:
+                    # Nothing parsed although the balance moved: the table was
+                    # not recognised.  Never paper over that.
+                    raise ParseError(
+                        0,
+                        f"{self.filename}: balance changed by {diff} but no "
+                        "transactions were parsed — the transaction table was "
+                        "not recognised.",
+                    )
+                # Scalable prints the opening balance as of the first *value*
+                # date, so bookings valued before the period (or after it, on
+                # the previous statement) make it disagree with the listed
+                # transactions.  The caller opted in to trusting the closing
+                # balance, which it verifies against its own books.
+                derived_start = stmt.end_balance - total
                 logger.warning(
                     "Balance check failed: start=%s + sum(%d txns)=%s = %s, "
-                    "but parsed end=%s (diff=%s). Likely causes: a missing "
-                    "transaction, a misread amount, or wrong start/end balances.",
+                    "but parsed end=%s (diff=%s). Using start balance %s "
+                    "derived from the end balance — verify it against the "
+                    "previous statement's end balance.",
                     stmt.start_balance,
                     len(stmt.lines),
                     total,
                     expected_end,
                     stmt.end_balance,
                     diff,
+                    derived_start,
                 )
+                stmt.start_balance = derived_start
 
     def split_records(self) -> Iterator[str]:
         return iter([])
