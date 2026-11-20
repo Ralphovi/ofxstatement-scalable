@@ -607,3 +607,35 @@ def test_inconsistent_opening_balance_is_derived_from_end_balance():
     stmt = _make_parser(text).statement
     assert stmt.end_balance == Decimal("1608.88")
     assert stmt.start_balance == Decimal("0.00")
+
+
+def test_amounts_without_thousands_separator():
+    text = BALANCED_TEXT.replace(
+        "Balance on 01.12.2025 1,000.00 EUR", "Balance on 01.12.2025 1000.00 EUR"
+    ).replace(
+        "05.12.2025 05.12.2025 Trade fee -50.00 EUR",
+        "04.12.2025 04.12.2025 Credit transfer +1000.00 EUR\n"
+        "05.12.2025 05.12.2025 Trade fee -1050.00 EUR",
+    )
+    stmt = _make_parser(text).statement
+    assert [line.amount for line in stmt.lines] == [
+        Decimal("1000.00"),
+        Decimal("-1050.00"),
+    ]
+    assert stmt.start_balance == Decimal("1000.00")
+    assert stmt.end_balance == Decimal("950.00")
+
+
+def test_german_amounts_without_thousands_separator():
+    text = GERMAN_LOCALE_TEXT.replace("-1.202,50 EUR", "-1202,50 EUR")
+    stmt = _make_parser(text).statement
+    assert stmt.lines[1].amount == Decimal("-1202.50")
+    assert stmt.end_balance == Decimal("1608.88")
+
+
+def test_unparsed_rows_block_opening_balance_derivation():
+    # The only row drifts out of _TX_RE: the printed balances no longer
+    # reconcile, and deriving the opening balance would hide the lost row.
+    text = BALANCED_TEXT.replace("Trade fee -50.00 EUR", "Trade fee EUR -50.00")
+    with pytest.raises(ParseError, match="unparsed transaction row"):
+        _make_parser(text)

@@ -49,7 +49,8 @@ _DOCTYPE_SECURITIES_RE = re.compile(
 # --- transaction row --------------------------------------------------------
 # DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR   (English locale)
 # DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N.NNN,NN EUR   (German locale)
-_AMOUNT = r"[+-]?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}"
+# Thousands separators are optional: "1,234.56", "1.234,56" and "1234.56".
+_AMOUNT = r"[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2}"
 _TX_RE = re.compile(
     r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+("
     + _AMOUNT
@@ -468,6 +469,17 @@ class ScalableParser(StatementParser[str]):
             expected_end = stmt.start_balance + total
             diff = stmt.end_balance - expected_end
             if abs(diff) > Decimal("0.005"):
+                if candidates:
+                    # Known unparsed rows explain (part of) the gap; adjusting
+                    # the opening balance would hide them behind a balance
+                    # that reconciles.  Fail instead.
+                    raise ParseError(
+                        0,
+                        f"{self.filename}: balance mismatch (diff={diff}) with "
+                        f"{len(candidates)} unparsed transaction row(s), e.g. "
+                        f"{candidates[0][:100]!r} — refusing to derive the "
+                        "opening balance from incomplete transactions.",
+                    )
                 # Scalable prints the opening balance as of the first *value*
                 # date, so bookings valued before the period (or after it, on
                 # the previous statement) make it disagree with the listed
