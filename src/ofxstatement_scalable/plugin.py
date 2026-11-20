@@ -49,8 +49,11 @@ _DOCTYPE_SECURITIES_RE = re.compile(
 # --- transaction row --------------------------------------------------------
 # DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N,NNN.NN EUR   (English locale)
 # DD.MM.YYYY  DD.MM.YYYY  <description>  [+-]N.NNN,NN EUR   (German locale)
-# Thousands separators are optional: "1,234.56", "1.234,56" and "1234.56".
-_AMOUNT = r"[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2}"
+# English "1,234.56" / German "1.234,56"; thousands separators are optional
+# ("1234.56", "1234,56") but must differ from the decimal separator.
+_AMOUNT = (
+    r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}" r"|(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2})"
+)
 _TX_RE = re.compile(
     r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+("
     + _AMOUNT
@@ -218,13 +221,30 @@ class ScalablePlugin(Plugin):
     """Scalable Capital statement plugin"""
 
     def get_parser(self, filename: str) -> ScalableParser:
-        return ScalableParser(filename)
+        mode = str(self.settings.get("opening_balance", "printed")).strip().lower()
+        if mode not in OPENING_BALANCE_MODES:
+            raise ValueError(
+                f"opening_balance must be one of {', '.join(OPENING_BALANCE_MODES)}, "
+                f"not {mode!r}"
+            )
+        return ScalableParser(filename, opening_balance=mode)
+
+
+# "printed": a statement whose printed balances don't reconcile is rejected.
+# "derive":  the opening balance is derived from the closing balance instead.
+#            Only for consumers that check each closing balance against the
+#            next statement or their own books: a single file cannot tell
+#            Scalable's value-dated opening balance from a lost transaction.
+OPENING_BALANCE_MODES = ("printed", "derive")
 
 
 class ScalableParser(StatementParser[str]):
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, opening_balance: str = "printed") -> None:
         super().__init__()
+        if opening_balance not in OPENING_BALANCE_MODES:
+            raise ValueError(f"unknown opening_balance mode {opening_balance!r}")
         self.filename = filename
+        self.opening_balance = opening_balance
 
     def parse(self) -> Statement:
         # Version line first so the user reading the convert output can
@@ -480,11 +500,31 @@ class ScalableParser(StatementParser[str]):
                         f"{candidates[0][:100]!r} — refusing to derive the "
                         "opening balance from incomplete transactions.",
                     )
+                if self.opening_balance != "derive":
+                    raise ParseError(
+                        0,
+                        f"{self.filename}: start {stmt.start_balance} + "
+                        f"{len(stmt.lines)} transaction(s) {total} = "
+                        f"{expected_end}, but the end balance is "
+                        f"{stmt.end_balance} (diff={diff}). Scalable's printed "
+                        "opening balance is value-dated and often disagrees; "
+                        "set opening_balance = derive if your books check each "
+                        "closing balance.",
+                    )
+                if not stmt.lines:
+                    # Nothing parsed although the balance moved: the table was
+                    # not recognised.  Never paper over that.
+                    raise ParseError(
+                        0,
+                        f"{self.filename}: balance changed by {diff} but no "
+                        "transactions were parsed — the transaction table was "
+                        "not recognised.",
+                    )
                 # Scalable prints the opening balance as of the first *value*
                 # date, so bookings valued before the period (or after it, on
                 # the previous statement) make it disagree with the listed
-                # transactions.  The closing balance is consistent with the
-                # next statement's bookings, so trust it and derive the start.
+                # transactions.  The caller opted in to trusting the closing
+                # balance, which it verifies against its own books.
                 derived_start = stmt.end_balance - total
                 logger.warning(
                     "Balance check failed: start=%s + sum(%d txns)=%s = %s, "

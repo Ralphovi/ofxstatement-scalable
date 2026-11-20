@@ -171,9 +171,13 @@ Scalable Capital Bank GmbH HRB 217778 ...
 """
 
 
-def _make_parser(text: str) -> ScalableParser:
-    """Return a ScalableParser whose PDF extraction is mocked to return *text*."""
-    parser = ScalableParser("dummy.pdf")
+def _make_parser(text: str, opening_balance: str = "derive") -> ScalableParser:
+    """Return a ScalableParser whose PDF extraction is mocked to return *text*.
+
+    Defaults to "derive": several fixtures are excerpts of real statements
+    whose balances don't reconcile.
+    """
+    parser = ScalableParser("dummy.pdf", opening_balance=opening_balance)
 
     mock_page = MagicMock()
     mock_page.extract_text.return_value = text
@@ -288,8 +292,15 @@ class TestEmptyStatement:
                 _is_tx_line(line) or line.strip().startswith(("6.25", "0.67", "0.24"))
             )
         ]
-        parser = _make_parser("\n".join(cleaned))
+        # Real empty statements print the same opening and closing balance.
+        empty = "\n".join(cleaned).replace(
+            "Balance on 31.12.2025 1,204.44 EUR", "Balance on 31.12.2025 14,466.34 EUR"
+        )
+        parser = _make_parser(empty, opening_balance="printed")
         assert parser.statement.lines == []
+        # A moved balance without any parsed row is never reconciled.
+        with pytest.raises(ParseError, match="not recognised"):
+            _make_parser("\n".join(cleaned))
 
 
 def _is_tx_line(line: str) -> bool:
@@ -508,14 +519,23 @@ class TestSanityCheck:
             _make_parser(BALANCED_TEXT)
         assert not any("Balance check failed" in r.message for r in caplog.records)
 
-    def test_balance_mismatch_warns(self, caplog):
+    def test_balance_mismatch_rejected_by_default(self):
+        text = BALANCED_TEXT.replace(
+            "Balance on 31.12.2025 950.00 EUR",
+            "Balance on 31.12.2025 999.99 EUR",
+        )
+        with pytest.raises(ParseError, match="opening_balance = derive"):
+            _make_parser(text, opening_balance="printed")
+
+    def test_balance_mismatch_warns_in_derive_mode(self, caplog):
         text = BALANCED_TEXT.replace(
             "Balance on 31.12.2025 950.00 EUR",
             "Balance on 31.12.2025 999.99 EUR",
         )
         with caplog.at_level("WARNING", logger="ofxstatement_scalable.plugin"):
-            _make_parser(text)
+            stmt = _make_parser(text, opening_balance="derive").statement
         assert any("Balance check failed" in r.message for r in caplog.records)
+        assert stmt.start_balance == Decimal("1049.99")
 
     def test_regex_drift_warns(self, caplog):
         # Simulate drift: amount format changed from "-50.00 EUR" to "EUR -50,00"
@@ -533,7 +553,7 @@ Booking Value date Description Amount
 02.12.2025 04.12.2025 Trade fee EUR -50,00
 """
         with caplog.at_level("WARNING", logger="ofxstatement_scalable.plugin"):
-            stmt = _make_parser(drifted).statement
+            stmt = _make_parser(drifted, opening_balance="printed").statement
         assert len(stmt.lines) == 0
         assert any("_TX_RE may be out of date" in r.message for r in caplog.records)
 
@@ -604,9 +624,11 @@ def test_inconsistent_opening_balance_is_derived_from_end_balance():
     text = GERMAN_LOCALE_TEXT.replace(
         "Kontostand am 01.04.2026 0,00 EUR", "Kontostand am 01.04.2026 190,00 EUR"
     )
-    stmt = _make_parser(text).statement
+    stmt = _make_parser(text, opening_balance="derive").statement
     assert stmt.end_balance == Decimal("1608.88")
     assert stmt.start_balance == Decimal("0.00")
+    with pytest.raises(ParseError):
+        _make_parser(text, opening_balance="printed")
 
 
 def test_amounts_without_thousands_separator():
@@ -638,4 +660,39 @@ def test_unparsed_rows_block_opening_balance_derivation():
     # reconcile, and deriving the opening balance would hide the lost row.
     text = BALANCED_TEXT.replace("Trade fee -50.00 EUR", "Trade fee EUR -50.00")
     with pytest.raises(ParseError, match="unparsed transaction row"):
-        _make_parser(text)
+        _make_parser(text, opening_balance="derive")
+
+
+def test_unrecognised_table_is_not_reconciled():
+    text = BALANCED_TEXT.replace(
+        "Booking Value date Description Amount", "Booking Value date Text Amount"
+    )
+    with pytest.raises(ParseError, match="not recognised"):
+        _make_parser(text, opening_balance="derive")
+
+
+def test_row_split_across_lines_is_not_reconciled():
+    # Amount and currency on separate lines: no row, no candidate.
+    text = BALANCED_TEXT.replace(
+        "05.12.2025 05.12.2025 Trade fee -50.00 EUR",
+        "05.12.2025 05.12.2025 Trade fee -50.00\nEUR",
+    )
+    with pytest.raises(ParseError):
+        _make_parser(text, opening_balance="derive")
+
+
+@pytest.mark.parametrize("amount", ["-1,234,56", "-1.234.56", "-1,234.567"])
+def test_amount_with_ambiguous_separators_is_not_a_row(amount):
+    text = BALANCED_TEXT.replace("Trade fee -50.00 EUR", f"Trade fee {amount} EUR")
+    with pytest.raises(ParseError):
+        _make_parser(text, opening_balance="derive")
+
+
+def test_plugin_setting_selects_opening_balance_mode():
+    from ofxstatement.ui import UI
+
+    plugin = ScalablePlugin(UI(), {"opening_balance": "derive"})
+    assert plugin.get_parser("x.pdf").opening_balance == "derive"
+    assert ScalablePlugin(UI(), {}).get_parser("x.pdf").opening_balance == "printed"
+    with pytest.raises(ValueError):
+        ScalablePlugin(UI(), {"opening_balance": "yes"}).get_parser("x.pdf")
